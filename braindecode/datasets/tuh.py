@@ -99,8 +99,11 @@ class TUH(BaseConcatDataset):
         age, gender = _parse_age_and_gender_from_edf_header(file_path)
         raw = mne.io.read_raw_edf(file_path, preload=preload)
 
+        # All recording in the TUH were from 2002-2017.
+        # In case the real date is unknown, a default date before all
+        # the real dates is used:
         meas_date = (
-            datetime(1, 1, 1, tzinfo=timezone.utc)
+            datetime(2000, 1, 1, tzinfo=timezone.utc)
             if raw.info["meas_date"] is None
             else raw.info["meas_date"]
         )
