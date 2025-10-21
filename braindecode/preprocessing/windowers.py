@@ -630,6 +630,65 @@ def _create_windows_from_events(
     return windows_ds
 
 
+def _create_fixed_length_windows_metadata(
+    start,
+    stop,
+    window_size_samples,
+    window_stride_samples,
+    drop_last_window,
+    target,
+    lazy_metadata,
+):
+    # assume window should be whole recording
+    if window_size_samples is None:
+        window_size_samples = stop - start
+    if window_stride_samples is None:
+        window_stride_samples = window_size_samples
+
+    last_potential_start = stop - window_size_samples
+
+    if lazy_metadata:
+        factory = _FixedLengthWindowFunctions(
+            start,
+            last_potential_start,
+            window_stride_samples,
+            window_size_samples,
+            target,
+        )
+        metadata = _LazyDataFrame(
+            length=factory.length,
+            functions={
+                "i_window_in_trial": factory.i_window_in_trial,
+                "i_start_in_trial": factory.i_start_in_trial,
+                "i_stop_in_trial": factory.i_stop_in_trial,
+                "target": factory.target,
+            },
+            columns=[
+                "i_window_in_trial",
+                "i_start_in_trial",
+                "i_stop_in_trial",
+                "target",
+            ],
+        )
+    else:
+        # already includes last incomplete window start
+        starts = np.arange(start, last_potential_start + 1, window_stride_samples)
+
+        if not drop_last_window and starts[-1] < last_potential_start:
+            # if last window does not end at trial stop, make it stop there
+            starts = np.append(starts, last_potential_start)
+
+        metadata = pd.DataFrame(
+            {
+                "i_window_in_trial": np.arange(len(starts)),
+                "i_start_in_trial": starts,
+                "i_stop_in_trial": starts + window_size_samples,
+                "target": len(starts) * [target],
+            }
+        )
+    return metadata
+
+
 def _create_fixed_length_windows(
     ds,
     start_offset_samples,
@@ -668,14 +727,6 @@ def _create_fixed_length_windows(
     ]
     stop = ds.raw.n_times if stop_offset_samples is None else stop_offset_samples
 
-    # assume window should be whole recording
-    if window_size_samples is None:
-        window_size_samples = stop - start_offset_samples
-    if window_stride_samples is None:
-        window_stride_samples = window_size_samples
-
-    last_potential_start = stop - window_size_samples
-
     # get targets from dataset description if they exist
     target = -1 if ds.target_name is None else ds.description[ds.target_name]
     if mapping is not None:
@@ -686,47 +737,15 @@ def _create_fixed_length_windows(
         else:
             target = mapping[target]
 
-    if lazy_metadata:
-        factory = _FixedLengthWindowFunctions(
-            start_offset_samples,
-            last_potential_start,
-            window_stride_samples,
-            window_size_samples,
-            target,
-        )
-        metadata = _LazyDataFrame(
-            length=factory.length,
-            functions={
-                "i_window_in_trial": factory.i_window_in_trial,
-                "i_start_in_trial": factory.i_start_in_trial,
-                "i_stop_in_trial": factory.i_stop_in_trial,
-                "target": factory.target,
-            },
-            columns=[
-                "i_window_in_trial",
-                "i_start_in_trial",
-                "i_stop_in_trial",
-                "target",
-            ],
-        )
-    else:
-        # already includes last incomplete window start
-        starts = np.arange(
-            start_offset_samples, last_potential_start + 1, window_stride_samples
-        )
-
-        if not drop_last_window and starts[-1] < last_potential_start:
-            # if last window does not end at trial stop, make it stop there
-            starts = np.append(starts, last_potential_start)
-
-        metadata = pd.DataFrame(
-            {
-                "i_window_in_trial": np.arange(len(starts)),
-                "i_start_in_trial": starts,
-                "i_stop_in_trial": starts + window_size_samples,
-                "target": len(starts) * [target],
-            }
-        )
+    metadata = _create_fixed_length_windows_metadata(
+        start_offset_samples,
+        stop,
+        window_size_samples,
+        window_stride_samples,
+        drop_last_window,
+        target,
+        lazy_metadata,
+    )
 
     window_kwargs.append(
         (
