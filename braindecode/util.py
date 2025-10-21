@@ -403,7 +403,53 @@ def read_all_file_names(directory, extension):
     """
     assert extension.startswith(".")
     file_paths = glob.glob(directory + "**/*" + extension, recursive=True)
-    assert len(file_paths) > 0, (
-        f"something went wrong. Found no {extension} files in {directory}"
-    )
+    assert (
+        len(file_paths) > 0
+    ), f"something went wrong. Found no {extension} files in {directory}"
     return file_paths
+
+
+def annotations_complement(
+    annotations: mne.Annotations, total_duration: float, description="no-event"
+) -> mne.Annotations:
+    """Compute the complement of an MNE annotations object.
+
+    i.e., all the time segments where no annotation is present in the original annotations.
+
+    *Note: in the long term, it would be better to have this functionality in MNE directly.*
+
+    Parameters
+    ----------
+    annotations: mne.Annotations
+        The original annotations.
+    total_duration: float
+        The total duration of the raw recording.
+    description: str
+        The description to assign to the complement annotations.
+    """
+    onset = annotations.onset
+    duration = annotations.duration
+
+    # sort:
+    idx = np.argsort(onset)
+    onset = onset[idx]
+    duration = duration[idx]
+
+    end_last = 0.0
+    new_onset, new_duration = [], []
+    for o, d in zip(onset, duration):
+        if o > end_last:
+            new_onset.append(end_last)
+            new_duration.append(o - end_last)
+        end_last = max(o + d, end_last)
+
+    if end_last < total_duration:
+        new_onset.append(end_last)
+        new_duration.append(total_duration - end_last)
+
+    return mne.Annotations(
+        onset=new_onset,
+        duration=new_duration,
+        description=[description] * len(new_onset),
+        orig_time=annotations.orig_time,
+    )

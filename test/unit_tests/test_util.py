@@ -25,6 +25,7 @@ from braindecode.util import (
     read_all_file_names,
     set_random_seeds,
     th_to_np,
+    annotations_complement,
 )
 
 
@@ -373,3 +374,17 @@ def test_read_all_files_not_extension():
     with pytest.raises(AssertionError):
         # Call the read_all_file_names function with a non-existent directory
         read_all_file_names('non_existent_dir', 'txt')
+
+def test_plot_annotations_complement():
+    duration = 100
+    n = 15
+    onsets = np.random.uniform(0, duration - 10, size=n)
+    durations = np.random.uniform(1, 10, size=n)
+    annotations = mne.Annotations(onset=onsets, duration=durations, description=["foo"] * n)
+    complement = annotations_complement(annotations, duration)
+    raw = mne.io.RawArray(np.zeros((1, int(duration * 100))), mne.create_info(1, 100))
+    annotations += complement
+    raw.set_annotations(annotations)
+    raw.plot(start=0, duration=duration)
+    import matplotlib.pyplot as plt
+    plt.show()
