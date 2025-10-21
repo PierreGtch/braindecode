@@ -11,19 +11,23 @@
 #          Maciej Sliwowski <maciek.sliwowski@gmail.com>
 #          Mohammed Fattouh <mo.fattouh@gmail.com>
 #          Robin Schirrmeister <robintibor@gmail.com>
+#          Pierre Guetschel <pierre.guetschel@gmail.com>
 #
 # License: BSD (3-clause)
 
 from __future__ import annotations
 
 import warnings
-from typing import Any, Callable
+from copy import deepcopy
+from typing import Any, Callable, Literal
 
 import mne
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from numpy.typing import ArrayLike
+
+from braindecode.util import annotations_complement
 
 from ..datasets.base import BaseConcatDataset, EEGWindowsDataset, WindowsDataset
 
@@ -453,6 +457,141 @@ def create_fixed_length_windows(
     return BaseConcatDataset(list_of_windows_ds)
 
 
+def create_fixed_length_windows_within_events(
+    concat_ds: BaseConcatDataset,
+    start_offset_samples: int = 0,
+    stop_offset_samples: int | None = None,
+    window_size_samples: int | None = None,
+    window_stride_samples: int | None = None,
+    drop_last_window: bool | None = None,
+    mapping: dict[str, int] | None = None,
+    no_event_description: str | None = None,
+    preload: bool = False,
+    picks: str | ArrayLike | slice | None = None,
+    reject: dict[str, float] | None = None,
+    flat: dict[str, float] | None = None,
+    on_missing: str = "error",
+    on_too_short: Literal["error", "warning", "ignore"] = "warning",
+    n_jobs: int = 1,
+    verbose: bool | str | int | None = "error",
+):
+    """Similar to :func:`create_fixed_length_windows`, but within events.
+
+    This function creates fixed-length windows at regular intervals
+    within the events of whose name is specified in the mapping keys.
+
+    The events are extracted from the annotations of the raw data.
+    The target of a window corresponds to the event within which it was created.
+
+    Parameters
+    ----------
+    concat_ds: ConcatDataset
+        A concat of base datasets each holding raw and description.
+    start_offset_samples: int
+        Start offset from beginning of recording in samples.
+    stop_offset_samples: int | None
+        Stop offset from beginning of recording in samples. If None, set to be
+        the end of the recording.
+    window_size_samples: int | None
+        Window size in samples. If None, set to be the maximum possible window size, ie length of
+        the recording, once offsets are accounted for.
+    window_stride_samples: int | None
+        Stride between windows in samples. If None, set to be equal to winddow_size_samples, so
+        windows will not overlap.
+    drop_last_window: bool | None
+        Whether or not have a last overlapping window, when windows do not
+        equally divide the continuous signal. Must be set to a bool if window size and stride are
+        not None.
+    mapping: dict(str: int) | None
+        Mapping from event description to target value.
+        If mapping is None, all events found in the recordings will be used,
+        events descriptions will be sorted and assigned an index starting from 0.
+    no_event_description: str | None
+        If not None, segments that do not correspond to any event will also be included as windows.
+        In this case, this parameter will specify the description to use for windows that do not correspond to any event.
+    preload: bool
+        If True, preload the data of the Epochs objects.
+    picks: str | list | slice | None
+        Channels to include. If None, all available channels are used. See
+        mne.Epochs.
+    reject: dict | None
+        Epoch rejection parameters based on peak-to-peak amplitude. If None, no
+        rejection is done based on peak-to-peak amplitude. See mne.Epochs.
+    flat: dict | None
+        Epoch rejection parameters based on flatness of signals. If None, no
+        rejection based on flatness is done. See mne.Epochs.
+    on_too_short: Literal["error", "warning", "ignore"]
+        What to do if an event is shorter than the window size.
+    on_missing: str
+        What to do if one or several event ids are not found in the recording.
+        Valid keys are ‘error’ | ‘warning’ | ‘ignore’. See mne.Epochs.
+    n_jobs: int
+        Number of jobs to use to parallelize the windowing.
+    verbose: bool | str | int | None
+        Control verbosity of the logging output when calling mne.Epochs.
+
+    Returns
+    -------
+    windows_datasets: BaseConcatDataset
+        Concatenated datasets of WindowsDataset containing the extracted windows.
+    """
+    stop_offset_samples, drop_last_window = (
+        _check_and_set_fixed_length_window_arguments(
+            start_offset_samples,
+            stop_offset_samples,
+            window_size_samples,
+            window_stride_samples,
+            drop_last_window,
+            lazy_metadata=False,
+        )
+    )
+    filter_annotations = True
+    if mapping is None:
+        # If user did not specify mapping, we extract all events from all datasets
+        # and map them to increasing integers starting from 0
+        filter_annotations = False
+        events_set = set(
+            desc for ds in concat_ds.datasets for desc in ds.raw.annotations.description
+        )
+        if no_event_description is not None:
+            events_set.add(no_event_description)
+        events = sorted(list(events_set))
+        mapping = {event: i for i, event in enumerate(events)}
+    elif no_event_description is not None and no_event_description not in mapping:
+        raise ValueError(
+            f"{no_event_description=} is missing from the mapping provided."
+        )
+
+    # check if recordings are of different lengths
+    # lengths = np.array([ds.raw.n_times for ds in concat_ds.datasets])
+    # # TODO: update to look at annotations
+    # if (np.diff(lengths) != 0).any() and window_size_samples is None:
+    #     warnings.warn("Recordings have different lengths, they will not be batch-able!")
+
+    list_of_windows_ds = Parallel(n_jobs=n_jobs)(
+        delayed(_create_fixed_length_windows_within_events)(
+            ds,
+            start_offset_samples,
+            stop_offset_samples,
+            window_size_samples,
+            window_stride_samples,
+            drop_last_window,
+            mapping,
+            filter_annotations,
+            no_event_description,
+            preload,
+            picks,
+            reject,
+            flat,
+            on_missing,
+            on_too_short,
+            verbose,
+        )
+        for ds in concat_ds.datasets
+    )
+    return BaseConcatDataset(list_of_windows_ds)
+
+
 def _create_windows_from_events(
     ds,
     infer_mapping,
@@ -738,6 +877,74 @@ def _create_fixed_length_windows(
             target = mapping[target]
 
     metadata = _create_fixed_length_windows_metadata(
+        start_offset_samples,
+        stop,
+        window_size_samples,
+        window_stride_samples,
+        drop_last_window,
+        target,
+        lazy_metadata,
+    )
+
+    window_kwargs.append(
+        (
+            EEGWindowsDataset.__name__,
+            {"targets_from": targets_from, "last_target_only": last_target_only},
+        )
+    )
+    windows_ds = EEGWindowsDataset(
+        ds.raw,
+        metadata=metadata,
+        description=ds.description,
+        targets_from=targets_from,
+        last_target_only=last_target_only,
+    )
+    # add window_kwargs and raw_preproc_kwargs to windows dataset
+    setattr(windows_ds, "window_kwargs", window_kwargs)
+    kwargs_name = "raw_preproc_kwargs"
+    if hasattr(ds, kwargs_name):
+        setattr(windows_ds, kwargs_name, getattr(ds, kwargs_name))
+    return windows_ds
+
+
+def _create_fixed_length_windows_within_events(
+    ds,
+    start_offset_samples,
+    stop_offset_samples,
+    window_size_samples,
+    window_stride_samples,
+    drop_last_window,
+    mapping,
+    filter_annotations,
+    no_event_description,
+    preload,
+    picks,
+    reject,
+    flat,
+    on_missing,
+    on_too_short,
+    verbose="error",
+):
+    # catch window_kwargs to store to dataset
+    window_kwargs = [
+        (
+            create_fixed_length_windows_within_events.__name__,
+            _get_windowing_kwargs(locals()),
+        ),
+    ]
+
+    annotations = deepcopy(ds.raw.annotations)
+    if filter_annotations:
+        idx = np.isin(annotations, list(mapping.keys()))
+        annotations = annotations[idx]
+    if no_event_description is not None:
+        annotations += annotations_complement(
+            annotations,
+            total_duration=ds.raw.duration,
+            description=no_event_description,
+        )
+
+    metadata_list = _create_fixed_length_windows_metadata(
         start_offset_samples,
         stop,
         window_size_samples,
